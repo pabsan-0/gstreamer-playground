@@ -4,16 +4,12 @@ from ctypes import *
 import sys
 import numpy as np
 import cv2
-import multiprocessing as mp
-
 
 import gi
 gi.require_version('Gst', '1.0')
 gi.require_version('GstRtp', '1.0')
 gi.require_version('GstVideo', '1.0')
 from gi.repository import Gst, GLib, GstVideo
-
-
 
 
 def on_bus_message(bus: Gst.Bus, message: Gst.Message, loop: GLib.MainLoop):
@@ -35,18 +31,23 @@ def on_bus_message(bus: Gst.Bus, message: Gst.Message, loop: GLib.MainLoop):
     return True
 
 
-def on_identity_buffer (pad, info, u_data):
-    """ Gstreamer Pad Probe. Attach after decoding to retrieve a frame through
-    a queue passed as u_data.
+def probe_cb (pad, info, u_data):
+    """ Get Numpy array from BGR buffers via pad probe. Enforcing caps is cheaty
     """
     # Retrieve pad capabilities - needed to sort img bytes later  
     caps = pad.get_current_caps()
+    caps_struct = caps.get_structure(0)
     if not caps:
         print("Could not get caps", flush=True)
         return Gst.PadProbeReturn.OK
 
+    # Assert incoming video format
+    fmt_str = caps_struct.get_value('format')
+    if fmt_str != "BGR":
+        print("Uncompatible caps! Identity element NEEDS to receive BGR.", flush=True)
+        return Gst.PadProbeReturn.OK
+
     # Retrieve image size from caps - needed to sort img bytes later        
-    caps_struct = caps.get_structure(0)
     ret_h, height = caps_struct.get_int('height')
     ret_w, width  = caps_struct.get_int('width')
     if not (ret_h and ret_w):
@@ -61,13 +62,13 @@ def on_identity_buffer (pad, info, u_data):
         return Gst.PadProbeReturn.OK
 
     try:
-        # retrieve the bytes from the buffer to the caps image size
-        arr = np.ndarray(
-            (height, width, 3),
+        array = np.ndarray(
+            (height, width, 3), # CHEATY because I make up the 3-channel part
             buffer=buf.extract_dup(0, mapinfo.size),
             dtype=np.uint8
         )
-        print(arr.shape)
+        cv2.imwrite("probe.jpeg", array)
+
     except Exception as e:
         print(e, flush=True)
 
@@ -78,19 +79,25 @@ def on_identity_buffer (pad, info, u_data):
 
 
 
-def on_appsink_signal(sink, u_data):
+def appsink_cb (sink, u_data):
+    """ Get Numpy array from BGR buffers via appsink.
+
+    This is simple for BGR but a hairkiller if YUY. Just set the caps to BGR 
+    and place a videoconvert to let gstreamer do the conversion.
+    """
     sample = sink.emit("pull-sample")
     caps = sample.get_caps().get_structure(0)  # Gst.Structure
-
     rc, w = caps.get_int('width')
     rc, h = caps.get_int('height')
     fmt_str = caps.get_value('format')
+    
     fmt_enum = GstVideo.VideoFormat.from_string(fmt_str)
     fmt_info = GstVideo.VideoFormat.get_info(fmt_enum)
+
     c = int(fmt_info.n_components)
     bits = fmt_info.bits
     dtype = np.uint8 if bits!=16 else np.int16
-    depth = fmt_info.depth  # bits per channel
+    # depth = fmt_info.depth  # bits per channel
 
     buffer = sample.get_buffer()
     (result, mapinfo) = buffer.map(Gst.MapFlags.READ)
@@ -98,34 +105,15 @@ def on_appsink_signal(sink, u_data):
         print("Could not map buffer!", flush=True)
         return Gst.FlowReturn.OK    
         
-    print("----------------")
-    print("Using %s format" % fmt_info.name)
-    print("Pixel bits: %d, Per-channel depth: %s" % (bits, depth))
-    print("Image dimensions:", h, w, c)  
-    print("Need to allocate %d incoming bytes" % mapinfo.size)
-    print("        This is: %d = 480 * 640 * (depth[0] + depth[1] + depth[2] + depth[3]) / 8" %
-                                (480 * 640 * (depth[0] + depth[1] + depth[2] + depth[3]) / 8 )
-    )
-    print("Theoretical buffer bytes : %d" % (h * w * np.sum(depth) / 8))  
-    print()
-    print("A single pixel needs %d bytes per channel" % int(mapinfo.size / 480 / 640 * 8 / c))
-    print("Using dtype %s" % dtype) 
-
-    # mapinfo.size [bytes]= 480 * 640 * (c * bits_per_channel) / 8
-    # RGB: three channels, each channel needs one byte -> array has 3ch np.uint8
-
     array = np.ndarray(
         shape=(h, w, c),
         buffer=buffer.extract_dup(0, mapinfo.size),
         dtype=dtype
     )
-    
-    array = cv2.cvtColor(array, cv2.COLOR_RGB2BGR);
-    print(array.shape)
-    cv2.imwrite("echo.jpeg", array)
+
+    cv2.imwrite("appsink.jpeg", array)
 
     return Gst.FlowReturn.OK
-
 
 
 
@@ -137,9 +125,10 @@ if __name__ == "__main__":
     
     pipe_desc = f"""
         videotestsrc 
-            ! videoconvert ! video/x-raw,format=RGB,width=640,height=480
-            ! identity name=my_identity
-            ! appsink emit-signals=true name=my_appsink
+            ! videoconvert ! video/x-raw,format=I420,width=640,height=480
+            ! videoconvert ! video/x-raw,format=BGR,width=640,height=480
+            ! identity name=my_identity 
+            ! appsink emit-signals=true name=my_appsink caps="video/x-raw,format=BGR"
         """
 
     # Parsing and setting stuff up
@@ -150,14 +139,14 @@ if __name__ == "__main__":
     bus.add_signal_watch()
     bus.connect("message", on_bus_message, loop)
 
-    # Probing a pad for custom applications
+    # Using the appsink
     element = pipeline.get_by_name("my_appsink")
-    element.connect("new-sample", on_appsink_signal, None)
+    element.connect("new-sample", appsink_cb, None)
 
-    # element = pipeline.get_by_name("my_identity")
-    # pad = element.get_static_pad('src')
-    # pad.add_probe(Gst.PadProbeType.BUFFER, on_identity_buffer, None)
-
+    # Probing a pad
+    element = pipeline.get_by_name("my_identity") 
+    pad = element.get_static_pad('src')
+    pad.add_probe(Gst.PadProbeType.BUFFER, probe_cb, None)
 
 
     # Start the pipeline
