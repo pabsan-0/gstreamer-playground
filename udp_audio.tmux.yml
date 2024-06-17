@@ -1,0 +1,9 @@
+#! /usr/bin/env -S tmuxinator start -p
+
+name: udp_audio
+on_project_exit: killall gst-launch-1.0; tmux kill-window
+windows:
+  - main:
+      panes:
+        - gst-launch-1.0 -v autoaudiosrc ! audioconvert ! queue  ! rtpL24pay ! udpsink host=0.0.0.0 auto-multicast=true port=5000 sync=0 
+        - gst-launch-1.0 -v udpsrc uri=udp://0.0.0.0:5000 caps="application/x-rtp,channels=(int)2,format=(string)S16LE,media=(string)audio,payload=(int)96,clock-rate=(int)44100,encoding-name=(string)L24" ! queue ! rtpL24depay ! decodebin ! audioconvert ! tee name=t ! autoaudiosink  t.! spectrascope ! videoconvert ! xvimagesink sync=0 async=0
