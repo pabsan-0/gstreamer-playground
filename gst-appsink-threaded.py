@@ -171,6 +171,9 @@ class GstLiveSource:
         appsink_user_cb = u_data
         appsink_user_cb(array)
 
+        # Memory cleanup
+        buffer.unmap(mapinfo)
+        
         return Gst.FlowReturn.OK
 
 
