@@ -112,6 +112,8 @@ def appsink_cb (sink, u_data):
     )
 
     cv2.imwrite("appsink.jpeg", array)
+    
+    buffer.unmap(mapinfo)
 
     return Gst.FlowReturn.OK
 
