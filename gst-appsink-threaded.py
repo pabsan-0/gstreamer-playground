@@ -7,6 +7,9 @@ import time
 import gi
 import numpy as np
 
+# Fix: libproxy may segfault when using rtsp on threaded context
+# os.environ["GIO_USE_PROXY_RESOLVER"] = "dummy"
+
 gi.require_version("Gst", "1.0")
 gi.require_version("GstRtp", "1.0")
 gi.require_version("GstVideo", "1.0")
@@ -100,6 +103,9 @@ class GstLiveSource:
         # Using the appsink
         element = pipeline.get_by_name("my_appsink")
         element.connect("new-sample", self._appsink_cb, self.appsink_user_cb)
+        
+        # Send events to GLib to prevent context.iteration() from blocking indefinitely
+        GLib.timeout_add(1000, lambda: True)
 
         # Start and run pipeline until stop event
         try:
